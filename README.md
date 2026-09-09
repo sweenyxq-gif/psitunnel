@@ -2,7 +2,7 @@
 
 # 🚇 PsiTunnel ( Web Filter and Firewall Bypass)
 
-### Python Psiphon-Inspired Circumvention Tunnel
+### Python Based PsiTunnel Tunnel
 
 **A lightweight, encrypted, multi-transport tunneling and proxy suite written in Python.**
 
