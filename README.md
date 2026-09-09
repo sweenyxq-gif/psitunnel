@@ -359,14 +359,6 @@ Contributions are welcome through bug reports, documentation improvements, tests
 
 ---
 
-# ⭐ Support the Project
-
-If PsiTunnel helped you, taught you something, or became useful in one of your projects:
-
-### ⭐ Please star the repository.
-
-Stars help more developers discover the project and support continued development.
-
 ---
 
 # ❤️ Credit & Attribution
