@@ -105,7 +105,11 @@ class FallbackManager:
                         sni = cand.get("sni", host)
                         conn = await connect_tls(host, port, self.psk, server_hostname=sni, upstream_proxy=self.upstream_proxy, timeout=4.0)
                     elif t_type == "ws":
-                        conn = await connect_ws(host, port, self.psk, upstream_proxy=self.upstream_proxy, timeout=4.0)
+                        use_ssl = cand.get("use_ssl", None)
+                        path = cand.get("path", "/ws")
+                        conn = await connect_ws(
+                            host, port, self.psk, path=path, use_ssl=use_ssl, upstream_proxy=self.upstream_proxy, timeout=6.0
+                        )
                     else:
                         self.logger.warning(f"Unknown transport type: {t_type}")
                         continue

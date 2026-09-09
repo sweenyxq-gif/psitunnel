@@ -204,31 +204,43 @@ async def connect_ws(
     port: int,
     psk: str,
     path: str = "/ws",
+    use_ssl: Optional[bool] = None,
     upstream_proxy: Optional[str] = None,
     timeout: float = 10.0,
 ) -> WsConnection:
     """
     Establishes a WebSocket transport connection to the relay server,
     optionally traversing an upstream corporate proxy.
+    Supports secure WebSockets (WSS) over TLS when port is 443 or use_ssl is True.
     """
+    if use_ssl is None:
+        use_ssl = (port == 443)
+
+    import ssl
+    ssl_context = ssl.create_default_context() if use_ssl else None
+
     reader, writer = await open_connection_with_upstream_proxy(
         target_host=host,
         target_port=port,
         upstream_proxy=upstream_proxy,
+        ssl_context=ssl_context,
+        server_hostname=host if use_ssl else None,
         timeout=timeout,
     )
 
     try:
         # Generate WebSocket key
         sec_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        host_hdr = host if port in (80, 443) else f"{host}:{port}"
+        scheme = "https" if use_ssl else "http"
         req = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
+            f"Host: {host_hdr}\r\n"
             f"Upgrade: websocket\r\n"
             f"Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {sec_key}\r\n"
             f"Sec-WebSocket-Version: 13\r\n"
-            f"Origin: https://{host}\r\n"
+            f"Origin: {scheme}://{host_hdr}\r\n"
             f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\n"
             f"Accept-Encoding: gzip, deflate, br\r\n"
             f"Accept-Language: en-US,en;q=0.9\r\n"

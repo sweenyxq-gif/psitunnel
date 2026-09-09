@@ -43,12 +43,19 @@ def main():
         "ws": args.ws_port,
     }
 
+    server_host = args.server.strip()
+    if "://" in server_host:
+        from urllib.parse import urlparse
+        parsed = urlparse(server_host)
+        server_host = parsed.hostname or server_host
+    server_host = server_host.strip("/")
+
     selected_transports = [t.strip().lower() for t in args.transports.split(",") if t.strip()]
     candidate_endpoints = []
     for t in selected_transports:
         port = transport_ports.get(t)
         if port:
-            cand = {"transport": t, "host": args.server, "port": port}
+            cand = {"transport": t, "host": server_host, "port": port}
             if t == "tls" and args.sni:
                 cand["sni"] = args.sni
             candidate_endpoints.append(cand)

@@ -4,6 +4,7 @@ Upstream proxy connection helper for traversing corporate / company firewalls.
 
 import asyncio
 import base64
+import ssl
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
@@ -12,15 +13,22 @@ async def open_connection_with_upstream_proxy(
     target_host: str,
     target_port: int,
     upstream_proxy: Optional[str] = None,
+    ssl_context: Optional[ssl.SSLContext] = None,
+    server_hostname: Optional[str] = None,
     timeout: float = 10.0,
 ) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """
-    Establishes a TCP connection to target_host:target_port, optionally tunneling
+    Establishes a TCP/TLS connection to target_host:target_port, optionally tunneling
     through a corporate/company HTTP forward proxy via the HTTP CONNECT method.
     """
     if not upstream_proxy:
         return await asyncio.wait_for(
-            asyncio.open_connection(target_host, target_port),
+            asyncio.open_connection(
+                target_host,
+                target_port,
+                ssl=ssl_context,
+                server_hostname=server_hostname,
+            ),
             timeout=timeout,
         )
 
@@ -62,6 +70,15 @@ async def open_connection_with_upstream_proxy(
             line = await reader.readline()
             if not line or line == b"\r\n" or line == b"\n":
                 break
+
+        if ssl_context:
+            loop = asyncio.get_running_loop()
+            protocol = writer._protocol
+            transport = await loop.start_tls(
+                writer._transport, protocol, ssl_context, server_hostname=server_hostname or target_host
+            )
+            writer._transport = transport
+            reader.set_transport(transport)
 
         return reader, writer
 
