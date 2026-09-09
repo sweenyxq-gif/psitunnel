@@ -83,6 +83,17 @@ def main():
             )
 
     async def run():
+        loop = asyncio.get_running_loop()
+
+        def proactor_exception_handler(l, context):
+            exc = context.get("exception")
+            # Suppress harmless Windows socket reset during close on tracker/short-lived connections
+            if isinstance(exc, ConnectionResetError) or (isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10054):
+                return
+            l.default_exception_handler(context)
+
+        loop.set_exception_handler(proactor_exception_handler)
+
         connected = await fallback_mgr.start()
         if not connected:
             print("[ERROR] Failed to establish initial tunnel connection. Check server availability.", file=sys.stderr)
