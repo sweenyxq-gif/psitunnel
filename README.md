@@ -353,35 +353,9 @@ Users are responsible for complying with applicable laws, organizational policie
 
 ---
 
-# 🤝 Contributing
-
-Contributions are welcome through bug reports, documentation improvements, tests, compatibility improvements, and pull requests.
-
----
-
----
-
 # ❤️ Credit & Attribution
 
 If you use **PsiTunnel**, its source code, architecture, protocol design, or significant portions of its implementation in another public project, please provide appropriate credit to the original project.
-
-Recommended attribution:
-
-```text
-Based on / inspired by PsiTunnel
-Original project: https://github.com/sweenyxq-gif/psitunnel
-```
-
-For GitHub projects:
-
-```markdown
-### Credits
-
-This project uses or is based on components from
-[PsiTunnel](https://github.com/sweenyxq-gif/psitunnel).
-
-If you find the original project useful, please consider giving it a ⭐.
-```
 
 > Please do not remove existing copyright, license, or attribution notices when redistributing substantial portions of the project.
 
