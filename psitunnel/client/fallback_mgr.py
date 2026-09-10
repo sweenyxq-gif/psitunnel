@@ -225,7 +225,7 @@ class FallbackManager:
                         self._pong_events[transport].set()
 
         except Exception as e:
-            self.logger.debug(f"Tunnel RX loop error: {e}")
+            self.logger.warning(f"Tunnel RX loop error: {e}", exc_info=True)
         finally:
             if self._running:
                 self.record_failure(candidate)

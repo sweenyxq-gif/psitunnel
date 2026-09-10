@@ -88,9 +88,12 @@ async def read_ws_frame(
     is_client: bool = False,
 ) -> Optional[bytes]:
     """
-    Reads next WebSocket frame from reader, handling masking and multi-byte lengths.
-    Handles RFC 6455 Ping control frames (0x09) by replying with Pong (0x0A) and ignores Pong (0x0A).
+    Reads next WebSocket message from reader, handling masking, multi-byte lengths,
+    control frames (Ping/Pong/Close), and frame fragmentation (RFC 6455 Section 5.4).
     """
+    fragments = []
+    initial_opcode = None
+
     while True:
         try:
             header = await reader.readexactly(2)
@@ -99,8 +102,8 @@ async def read_ws_frame(
 
             opcode = fin_and_opcode & 0x0F
             is_final = (fin_and_opcode & 0x80) != 0
-            if not is_final:
-                raise ValueError("Fragmented WebSocket frames are not supported")
+
+            # Control frames (Close, Ping, Pong)
             if opcode == 0x08:  # CLOSE
                 return None
 
@@ -142,10 +145,22 @@ async def read_ws_frame(
             elif opcode == 0x0A:  # PONG
                 continue
 
-            if opcode != 0x02:
-                raise ValueError(f"Unsupported WebSocket opcode: {opcode}")
+            # Data frame handling (opcode 0x00 is CONTINUATION, 0x02 is BINARY, 0x01 is TEXT)
+            if opcode != 0x00:
+                if initial_opcode is not None:
+                    raise ValueError("Expected continuation frame but received new data frame")
+                initial_opcode = opcode
 
-            return data
+            fragments.append(data)
+            total_len = sum(len(f) for f in fragments)
+            if total_len > MAX_FRAME_SIZE + 4:
+                raise ValueError("Assembled WebSocket message exceeds maximum size")
+
+            if is_final:
+                if initial_opcode != 0x02:
+                    raise ValueError(f"Unsupported WebSocket opcode: {initial_opcode}")
+                return b"".join(fragments)
+
         except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
             return None
 
@@ -241,10 +256,14 @@ class WsConnection(BaseTransportConnection):
                     raise ValueError("Message payload length mismatch")
                 payload = plaintext[TunnelMessage.HEADER_LEN:]
                 return TunnelMessage(cmd=cmd, conn_id=conn_id, payload=payload)
-            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
+                import logging
+                logging.getLogger("psitunnel.client").warning(f"WS stream disconnected by remote/proxy: {type(e).__name__}: {e}")
                 await self.close()
                 return None
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.getLogger("psitunnel.client").warning(f"WS unexpected recv error: {type(e).__name__}: {e}", exc_info=True)
                 await self.close()
                 raise
 
