@@ -163,7 +163,7 @@ class FallbackManager:
     async def connect_endpoint(self, candidate):
         """Shared connector for normal operation and doctor."""
         host, port = candidate["host"], candidate["port"]
-        common = dict(upstream_proxy=self.upstream_proxy, timeout=6.0)
+        common = dict(upstream_proxy=self.upstream_proxy, timeout=15.0)
         kind = candidate["transport"]
         if kind == "obfs":
             return await connect_obfs(host, port, self.psk, **common)

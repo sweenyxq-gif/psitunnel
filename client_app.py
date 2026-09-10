@@ -1,4 +1,4 @@
-﻿"""
+"""
 PsiTunnel Interactive Client App
 Prompts user for hosted relay server URL, port, and secret key,
 then establishes the encrypted tunnel and launches local proxies.
@@ -138,6 +138,11 @@ def main():
     raw_psk = input(f"Secret Key [{default_psk}]: ").strip()
     psk = raw_psk if raw_psk else default_psk
 
+    # 4. Prompt for Chrome launch
+    print(f"\nLaunch Google Chrome automatically with this proxy? [Y/n]:")
+    raw_chrome = input("Launch Chrome [Y]: ").strip().lower()
+    auto_chrome = raw_chrome not in ("n", "no")
+
     # Save preferences for next launch
     save_config(host, port, psk)
 
@@ -188,10 +193,23 @@ def main():
 
         loop.set_exception_handler(proactor_exception_handler)
 
-        connected = await fallback_mgr.start()
+        print("\n[INFO] Connecting to relay server...")
+        connected = False
+        for attempt in range(1, 4):
+            if attempt > 1:
+                print(f"[INFO] Server may be waking up. Retrying attempt {attempt}/3...")
+                await asyncio.sleep(2.0)
+            connected = await fallback_mgr.start()
+            if connected:
+                break
+
         if not connected:
-            print("\n[ERROR] Failed to establish tunnel connection. Please verify your server URL, port, and key.")
-            input("Press Enter to exit...")
+            print("\n[ERROR] Failed to establish tunnel connection.")
+            print("Please verify:")
+            print(f"  1. The server URL is correct: {host}")
+            print(f"  2. The server port is accessible: {port}")
+            print("  3. The pre-shared secret key matches the server")
+            input("\nPress Enter to exit...")
             return
 
         await socks_server.start()
@@ -203,15 +221,10 @@ def main():
         print(" HTTP Proxy   : http://127.0.0.1:8080")
         print("=" * 60 + "\n")
 
-        # Prompt for Chrome auto-launch
-        try:
-            auto_chrome = input("Launch Google Chrome automatically with this proxy? [Y/n]: ").strip().lower()
-            if auto_chrome in ("", "y", "yes"):
-                launch_chrome_with_proxy(1080)
-        except Exception:
-            pass
+        if auto_chrome:
+            launch_chrome_with_proxy(1080)
 
-        print("\n[ACTIVE] Proxy is running. Press Ctrl+C at any time to disconnect.\n")
+        print("[ACTIVE] Proxy is running. Press Ctrl+C at any time to disconnect.\n")
 
         monitor_task = asyncio.create_task(stats_monitor())
         stop_event = asyncio.Event()
