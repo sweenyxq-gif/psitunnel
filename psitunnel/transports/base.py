@@ -55,7 +55,8 @@ class BaseTransportConnection(abc.ABC):
         async with self._send_lock:
             frame = self.sender_session.encrypt_frame(payload, pad_len=pad_len)
             self.writer.write(frame)
-            await self.writer.drain()
+            if self.writer.transport and self.writer.transport.get_write_buffer_size() > 131072:
+                await self.writer.drain()
 
     async def recv_message(self) -> Optional[TunnelMessage]:
         """

@@ -50,6 +50,8 @@ class LocalSocks5Server:
             self.logger.info("SOCKS5 proxy stopped")
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        from psitunnel.common.socket_utils import tune_socket
+        tune_socket(writer)
         try:
             # 1. Version and Authentication Method Negotiation
             greeting = await asyncio.wait_for(reader.readexactly(2), timeout=10.0)

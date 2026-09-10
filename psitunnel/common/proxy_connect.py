@@ -21,8 +21,9 @@ async def open_connection_with_upstream_proxy(
     Establishes a TCP/TLS connection to target_host:target_port, optionally tunneling
     through a corporate/company HTTP forward proxy via the HTTP CONNECT method.
     """
+    from psitunnel.common.socket_utils import tune_socket
     if not upstream_proxy:
-        return await asyncio.wait_for(
+        reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
                 target_host,
                 target_port,
@@ -31,6 +32,8 @@ async def open_connection_with_upstream_proxy(
             ),
             timeout=timeout,
         )
+        tune_socket(writer)
+        return reader, writer
 
     # Parse upstream proxy URL, e.g. "http://corp-proxy.local:8080" or "corp-proxy.local:8080"
     if "://" not in upstream_proxy:

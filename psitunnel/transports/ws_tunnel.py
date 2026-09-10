@@ -202,7 +202,8 @@ class WsConnection(BaseTransportConnection):
             aead_frame = self.sender_session.encrypt_frame(payload, pad_len=pad_len)
             ws_frame = create_ws_frame(aead_frame, mask=self.is_client, opcode=0x02)
             self.writer.write(ws_frame)
-            await self.writer.drain()
+            if self.writer.transport and self.writer.transport.get_write_buffer_size() > 131072:
+                await self.writer.drain()
 
     async def recv_message(self):
         if self.is_closed:

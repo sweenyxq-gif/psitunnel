@@ -94,6 +94,8 @@ class RelaySession:
                     asyncio.open_connection(host, port),
                     timeout=15.0,
                 )
+                from psitunnel.common.socket_utils import tune_socket
+                tune_socket(writer)
             except Exception as e:
                 self.logger.warning(f"[Conn #{conn_id}] Failed connecting to {host}:{port}: {e}")
                 err_msg = TunnelMessage(
@@ -136,7 +138,7 @@ class RelaySession:
         """Reads target internet socket and sends CMD_DATA back to client."""
         try:
             while self._running and not self.transport.is_closed:
-                data = await channel.reader.read(32768)
+                data = await channel.reader.read(65536)
                 if not data:
                     break
                 data_msg = TunnelMessage(Command.CMD_DATA, conn_id=channel.conn_id, payload=data)
@@ -151,7 +153,8 @@ class RelaySession:
         if channel and not channel.writer.is_closing():
             try:
                 channel.writer.write(payload)
-                await channel.writer.drain()
+                if channel.writer.transport and channel.writer.transport.get_write_buffer_size() > 131072:
+                    await channel.writer.drain()
             except Exception as e:
                 self.logger.debug(f"[Conn #{conn_id}] Target write error: {e}")
                 await self._handle_close(conn_id, notify_remote=True)
@@ -274,16 +277,22 @@ class PsiTunnelServer:
         )
 
     async def _on_obfs_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        from psitunnel.common.socket_utils import tune_socket
+        tune_socket(writer)
         conn = await accept_obfs(reader, writer, self.psk)
         if conn:
             self._spawn_session(conn)
 
     async def _on_tls_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        from psitunnel.common.socket_utils import tune_socket
+        tune_socket(writer)
         conn = await accept_tls(reader, writer, self.psk)
         if conn:
             self._spawn_session(conn)
 
     async def _on_ws_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        from psitunnel.common.socket_utils import tune_socket
+        tune_socket(writer)
         conn = await accept_ws(reader, writer, self.psk)
         if conn:
             self._spawn_session(conn)

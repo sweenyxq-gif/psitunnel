@@ -198,7 +198,8 @@ class FallbackManager:
                     if ch and not ch.local_writer.is_closing():
                         try:
                             ch.local_writer.write(msg.payload)
-                            await ch.local_writer.drain()
+                            if ch.local_writer.transport and ch.local_writer.transport.get_write_buffer_size() > 131072:
+                                await ch.local_writer.drain()
                         except Exception:
                             await self._close_channel(msg.conn_id, notify_remote=True)
 
@@ -341,7 +342,7 @@ class FallbackManager:
 
             # Forward local reader data into the tunnel
             while self._running and not transport.is_closed and not local_writer.is_closing():
-                data = await local_reader.read(32768)
+                data = await local_reader.read(65536)
                 if not data:
                     break
                 data_msg = TunnelMessage(Command.CMD_DATA, conn_id=conn_id, payload=data)

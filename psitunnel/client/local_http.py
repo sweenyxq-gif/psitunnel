@@ -53,6 +53,8 @@ class LocalHttpProxyServer:
             self.logger.info("HTTP proxy stopped")
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        from psitunnel.common.socket_utils import tune_socket
+        tune_socket(writer)
         try:
             # Read request line
             request_line = await asyncio.wait_for(reader.readline(), timeout=10.0)
