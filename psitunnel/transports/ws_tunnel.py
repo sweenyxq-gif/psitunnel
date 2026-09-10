@@ -456,8 +456,8 @@ async def accept_ws(
         )
 
         if not valid_sec_key or not valid_upgrade:
-            # Not a WebSocket request; send 400 or anti-probing 404
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+            # Return 200 OK for uptime monitoring, health checks, and keepalive pingers
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nPsiTunnel Live OK")
             await writer.drain()
             writer.close()
             return None
