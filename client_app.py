@@ -93,7 +93,17 @@ def launch_chrome_with_proxy(socks_port: int = 1080):
             "https://api.ipify.org",
         ]
         try:
-            subprocess.Popen(args)
+            flags = 0
+            if sys.platform == "win32":
+                flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=flags,
+            )
             print("[INFO] Google Chrome launched with PsiTunnel proxy!")
             return True
         except Exception as e:
@@ -171,16 +181,21 @@ def main():
 
     async def stats_monitor():
         while True:
-            await asyncio.sleep(5.0)
-            active_t = fallback_mgr.active_transport.name.upper() if fallback_mgr.active_transport else "NONE"
-            channels_count = len(fallback_mgr.channels)
-            kb_sent = fallback_mgr.bytes_sent / 1024.0
-            kb_recv = fallback_mgr.bytes_received / 1024.0
-            sys.stdout.write(
-                f"\r[STATUS] Protocol: {active_t} | Streams: {channels_count} | "
-                f"Tx: {kb_sent:.1f} KB | Rx: {kb_recv:.1f} KB   "
-            )
-            sys.stdout.flush()
+            try:
+                await asyncio.sleep(5.0)
+                active_t = fallback_mgr.active_transport.name.upper() if fallback_mgr.active_transport else "NONE"
+                channels_count = len(fallback_mgr.channels)
+                kb_sent = fallback_mgr.bytes_sent / 1024.0
+                kb_recv = fallback_mgr.bytes_received / 1024.0
+                sys.stdout.write(
+                    f"\r[STATUS] Protocol: {active_t} | Streams: {channels_count} | "
+                    f"Tx: {kb_sent:.1f} KB | Rx: {kb_recv:.1f} KB   "
+                )
+                sys.stdout.flush()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
 
     async def run():
         loop = asyncio.get_running_loop()
@@ -246,9 +261,17 @@ def main():
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
-        print("\n[INFO] Client terminated.")
+        print("\n\n[INFO] Client disconnected by user.")
+    except Exception as e:
+        print(f"\n\n[ERROR] An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        print("[DONE] PsiTunnel stopped safely. Goodbye!")
+        print("[DONE] PsiTunnel stopped.")
+        try:
+            input("\nPress Enter to exit...")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
