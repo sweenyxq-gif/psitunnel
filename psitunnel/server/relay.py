@@ -8,6 +8,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from psitunnel.common.logger import setup_logger
+from psitunnel.common.flow import StreamFlow
 from psitunnel.common.protocol import (
     Command,
     TunnelMessage,
@@ -27,6 +28,7 @@ class Channel:
         self.reader = reader
         self.writer = writer
         self.read_task: Optional[asyncio.Task] = None
+        self.flow = None
 
 
 class RelaySession:
@@ -34,13 +36,16 @@ class RelaySession:
     Manages a single client connection over an established transport.
     """
 
-    def __init__(self, transport: BaseTransportConnection, psk: str, logger: logging.Logger):
+    def __init__(self, transport: BaseTransportConnection, psk: str, logger: logging.Logger, max_channels=128, bandwidth=0):
         self.transport = transport
+        self.max_channels, self.bandwidth = max_channels, bandwidth
         self.psk = psk
         self.logger = logger
         self.channels: Dict[int, Channel] = {}
         self._pending_connects: Dict[int, asyncio.Task] = {}
         self._running = True
+        self._cleanup_lock = asyncio.Lock()
+        self._cleaned = False
 
     async def run(self):
         self.logger.info(f"Relay session established via [{self.transport.name.upper()}] transport")
@@ -51,12 +56,32 @@ class RelaySession:
                     break
 
                 if msg.cmd == Command.CMD_CONNECT:
+                    if len(self.channels) + len(self._pending_connects) >= self.max_channels:
+                        await self.transport.send_message(TunnelMessage(Command.CMD_ERROR, msg.conn_id, b"Channel limit reached"))
+                        await self.transport.send_message(TunnelMessage(Command.CMD_CLOSE, msg.conn_id))
+                        continue
+                    if msg.conn_id == 0 or msg.conn_id in self.channels or msg.conn_id in self._pending_connects:
+                        err_msg = TunnelMessage(
+                            Command.CMD_ERROR,
+                            conn_id=msg.conn_id,
+                            payload=b"Invalid or duplicate connection ID",
+                        )
+                        await self.transport.send_message(err_msg)
+                        continue
                     task = asyncio.create_task(self._handle_connect(msg.conn_id, msg.payload))
                     self._pending_connects[msg.conn_id] = task
                 elif msg.cmd == Command.CMD_DATA:
                     await self._handle_data(msg.conn_id, msg.payload)
                 elif msg.cmd == Command.CMD_CLOSE:
-                    await self._handle_close(msg.conn_id)
+                    channel = self.channels.get(msg.conn_id)
+                    if channel:
+                        channel.flow.finish()
+                    else:
+                        await self._handle_close(msg.conn_id)
+                elif msg.cmd == Command.CMD_WINDOW:
+                    channel = self.channels.get(msg.conn_id)
+                    if channel:
+                        channel.flow.update(msg.payload)
                 elif msg.cmd == Command.CMD_PING:
                     pong = TunnelMessage(Command.CMD_PONG, conn_id=0, payload=msg.payload)
                     await self.transport.send_message(pong, inject_padding=False)
@@ -96,7 +121,10 @@ class RelaySession:
                 return
 
             channel = Channel(conn_id, host, port, reader, writer)
+            channel.flow = StreamFlow(self.transport, conn_id, writer,
+                lambda: self._handle_close(conn_id, notify_remote=True), self.bandwidth)
             self.channels[conn_id] = channel
+            channel.flow.start()
 
             # Notify client that remote socket is connected
             connected_msg = TunnelMessage(Command.CMD_CONNECTED, conn_id=conn_id)
@@ -120,7 +148,7 @@ class RelaySession:
                 if not data:
                     break
                 data_msg = TunnelMessage(Command.CMD_DATA, conn_id=channel.conn_id, payload=data)
-                await self.transport.send_message(data_msg)
+                await channel.flow.send(data)
         except Exception as e:
             self.logger.debug(f"[Conn #{channel.conn_id}] Target read error: {e}")
         finally:
@@ -130,8 +158,7 @@ class RelaySession:
         channel = self.channels.get(conn_id)
         if channel and not channel.writer.is_closing():
             try:
-                channel.writer.write(payload)
-                await channel.writer.drain()
+                channel.flow.receive(payload)
             except Exception as e:
                 self.logger.debug(f"[Conn #{conn_id}] Target write error: {e}")
                 await self._handle_close(conn_id, notify_remote=True)
@@ -143,7 +170,8 @@ class RelaySession:
 
         channel = self.channels.pop(conn_id, None)
         if channel:
-            if channel.read_task and not channel.read_task.done():
+            channel.flow.close()
+            if channel.read_task and channel.read_task is not asyncio.current_task() and not channel.read_task.done():
                 channel.read_task.cancel()
             try:
                 channel.writer.close()
@@ -159,16 +187,23 @@ class RelaySession:
                 pass
 
     async def cleanup(self):
-        self._running = False
-        for task in list(self._pending_connects.values()):
-            if not task.done():
-                task.cancel()
-        self._pending_connects.clear()
+        async with self._cleanup_lock:
+            if self._cleaned:
+                return
+            self._cleaned = True
+            self._running = False
+            pending_tasks = list(self._pending_connects.values())
+            for task in pending_tasks:
+                if not task.done():
+                    task.cancel()
+            self._pending_connects.clear()
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-        for conn_id in list(self.channels.keys()):
-            await self._handle_close(conn_id, notify_remote=False)
-        await self.transport.close()
-        self.logger.info("Relay session terminated")
+            for conn_id in list(self.channels.keys()):
+                await self._handle_close(conn_id, notify_remote=False)
+            await self.transport.close()
+            self.logger.info("Relay session terminated")
 
 
 class PsiTunnelServer:
@@ -176,8 +211,11 @@ class PsiTunnelServer:
     Main relay server capable of listening concurrently on multiple transport ports.
     """
 
-    def __init__(self, psk: str, cert_path: Optional[str] = None, key_path: Optional[str] = None):
+    def __init__(self, psk: str, cert_path: Optional[str] = None, key_path: Optional[str] = None, max_channels=128, bandwidth=0, max_sessions=64):
         self.psk = psk
+        if max_channels < 1 or max_sessions < 1 or bandwidth < 0:
+            raise ValueError("Invalid resource limits")
+        self.max_channels, self.bandwidth, self.max_sessions = max_channels, bandwidth, max_sessions
         self.cert_path = cert_path
         self.key_path = key_path
         self.logger = setup_logger("psitunnel.server")
@@ -231,7 +269,10 @@ class PsiTunnelServer:
             self.logger.info(f"Listening on {host}:{ws_port} [WS]")
 
     def _spawn_session(self, conn: BaseTransportConnection):
-        session = RelaySession(conn, self.psk, self.logger)
+        if len(self.active_sessions) >= self.max_sessions:
+            conn.writer.close()
+            return
+        session = RelaySession(conn, self.psk, self.logger, self.max_channels, self.bandwidth)
         self.active_sessions.append(session)
         task = asyncio.create_task(session.run())
         task.add_done_callback(
@@ -277,4 +318,3 @@ class PsiTunnelServer:
                 os.remove(self._temp_key)
             except Exception:
                 pass
-

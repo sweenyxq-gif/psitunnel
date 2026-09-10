@@ -12,6 +12,9 @@ from psitunnel.common.crypto import TunnelCryptoSession
 from psitunnel.common.protocol import TunnelMessage
 
 
+MAX_FRAME_SIZE = 10 * 1024 * 1024
+
+
 class BaseTransportConnection(abc.ABC):
     """
     Abstract bidirectional connection between client and relay over an established transport stream.
@@ -67,7 +70,7 @@ class BaseTransportConnection(abc.ABC):
                 # Read 4-byte frame length header
                 len_bytes = await self.reader.readexactly(4)
                 frame_len = struct.unpack(">I", len_bytes)[0]
-                if frame_len > 10 * 1024 * 1024:  # 10MB safety cap
+                if frame_len < 18 or frame_len > MAX_FRAME_SIZE:
                     raise ValueError(f"Frame length {frame_len} exceeds maximum limit")
 
                 ciphertext = await self.reader.readexactly(frame_len)
@@ -79,7 +82,12 @@ class BaseTransportConnection(abc.ABC):
                 cmd, conn_id, payload_len = TunnelMessage.decode_header(
                     plaintext[:TunnelMessage.HEADER_LEN]
                 )
-                payload = plaintext[TunnelMessage.HEADER_LEN:TunnelMessage.HEADER_LEN + payload_len]
+                actual_payload_len = len(plaintext) - TunnelMessage.HEADER_LEN
+                if payload_len != actual_payload_len:
+                    raise ValueError(
+                        f"Message payload length mismatch: declared {payload_len}, actual {actual_payload_len}"
+                    )
+                payload = plaintext[TunnelMessage.HEADER_LEN:]
                 return TunnelMessage(cmd=cmd, conn_id=conn_id, payload=payload)
             except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
                 await self.close()
@@ -100,4 +108,3 @@ class BaseTransportConnection(abc.ABC):
             await self.writer.wait_closed()
         except Exception:
             pass
-

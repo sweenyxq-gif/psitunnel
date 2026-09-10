@@ -4,17 +4,21 @@ Command line interface to launch the PsiTunnel client with auto-fallback and loc
 
 import argparse
 import asyncio
+import os
 import sys
 
 from psitunnel.client.fallback_mgr import FallbackManager
 from psitunnel.client.local_http import LocalHttpProxyServer
 from psitunnel.client.local_socks5 import LocalSocks5Server
+from psitunnel.client.config import parse_client_args
 
 
-def main():
+def create_parser():
     parser = argparse.ArgumentParser(description="PsiTunnel Censorship-Resistant Client")
+    parser.add_argument("--max-channels", type=int, default=128, help="Maximum simultaneous streams")
+    parser.add_argument("--bandwidth", type=int, default=0, help="Download bytes/sec per stream; 0 is unlimited")
     parser.add_argument("--server", default="127.0.0.1", help="Remote relay server hostname or IP")
-    parser.add_argument("--psk", default="psitunnel-secret-key-change-me", help="Pre-shared key")
+    parser.add_argument("--psk", default=os.getenv("PSK"), help="Pre-shared key (or set PSK)")
     parser.add_argument(
         "--transports",
         default="ws,tls,obfs",
@@ -34,36 +38,17 @@ def main():
         help="Optional corporate/company forward proxy to traverse (e.g. http://proxy.company.com:8080)",
     )
 
-    args = parser.parse_args()
+    return parser
 
-    # Build candidate endpoints based on priority order
-    transport_ports = {
-        "obfs": args.obfs_port,
-        "tls": args.tls_port,
-        "ws": args.ws_port,
-    }
 
-    server_host = args.server.strip()
-    if "://" in server_host:
-        from urllib.parse import urlparse
-        parsed = urlparse(server_host)
-        server_host = parsed.hostname or server_host
-    server_host = server_host.strip("/")
-
-    selected_transports = [t.strip().lower() for t in args.transports.split(",") if t.strip()]
-    candidate_endpoints = []
-    for t in selected_transports:
-        port = transport_ports.get(t)
-        if port:
-            cand = {"transport": t, "host": server_host, "port": port}
-            if t == "tls" and args.sni:
-                cand["sni"] = args.sni
-            candidate_endpoints.append(cand)
+def main():
+    args = parse_client_args(create_parser())
 
     fallback_mgr = FallbackManager(
         psk=args.psk,
-        candidate_endpoints=candidate_endpoints,
+        candidate_endpoints=args.endpoints,
         upstream_proxy=args.upstream_proxy,
+        max_channels=args.max_channels, bandwidth=args.bandwidth,
     )
     socks_server = LocalSocks5Server(fallback_mgr, host=args.local_host, port=args.socks_port)
     http_server = LocalHttpProxyServer(fallback_mgr, host=args.local_host, port=args.http_port)
@@ -133,4 +118,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

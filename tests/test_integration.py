@@ -103,6 +103,59 @@ class TestPsiTunnelIntegration(unittest.IsolatedAsyncioTestCase):
             await socks_srv.wait_closed()
             await fallback_mgr.stop()
 
+    async def test_automatically_reconnects_after_transport_drop(self):
+        candidates = [
+            {"transport": "ws", "host": "127.0.0.1", "port": self.ws_port},
+        ]
+        fallback_mgr = FallbackManager(psk=self.psk, candidate_endpoints=candidates)
+        self.assertTrue(await fallback_mgr.start())
+        original_transport = fallback_mgr.active_transport
+
+        try:
+            await original_transport.close()
+
+            async def wait_for_reconnect():
+                while (
+                    not fallback_mgr.is_connected
+                    or fallback_mgr.active_transport is original_transport
+                ):
+                    await asyncio.sleep(0.05)
+
+            await asyncio.wait_for(wait_for_reconnect(), timeout=5.0)
+            self.assertIsNot(fallback_mgr.active_transport, original_transport)
+        finally:
+            await fallback_mgr.stop()
+
+    async def test_large_download_crosses_flow_windows(self):
+        payload = b"flow-window-test" * 65536
+        async def target(reader, writer):
+            writer.write(payload)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        destination = await asyncio.start_server(target, "127.0.0.1", 0)
+        manager = FallbackManager(self.psk, [dict(transport="obfs", host="127.0.0.1", port=self.obfs_port)])
+        await manager.start()
+        proxy = LocalHttpProxyServer(manager, "127.0.0.1", 0)
+        await proxy.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.server.sockets[0].getsockname()[1])
+            port = destination.sockets[0].getsockname()[1]
+            writer.write(f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n".encode())
+            await writer.drain()
+            headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 3)
+            self.assertIn(b"200", headers)
+            self.assertEqual(await asyncio.wait_for(reader.readexactly(len(payload)), 5), payload)
+        finally:
+            if writer:
+                writer.close()
+                await writer.wait_closed()
+            await proxy.stop()
+            await manager.stop()
+            destination.close()
+            await destination.wait_closed()
+
     async def test_http_connect_proxy(self):
         candidates = [
             {"transport": "obfs", "host": "127.0.0.1", "port": self.obfs_port},
@@ -418,5 +471,3 @@ class TestPsiTunnelIntegration(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

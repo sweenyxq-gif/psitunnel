@@ -13,8 +13,10 @@ from psitunnel.common.cert_utils import generate_self_signed_cert
 from psitunnel.transports.base import BaseTransportConnection
 from psitunnel.transports.obfs_stream import (
     accept_obfs,
-    connect_obfs,
     ObfsConnection,
+    MAX_HANDSHAKE_FRAME_SIZE,
+    SERVER_CONFIRMATION_PREFIX,
+    SERVER_NONCE_LEN,
 )
 
 
@@ -135,12 +137,13 @@ async def connect_tls(
         import struct
         from psitunnel.common.crypto import (
             derive_keys,
+            derive_session_keys,
             generate_handshake_auth,
             TunnelCryptoSession,
         )
 
         salt = os.urandom(32)
-        c2s_key, s2c_key = derive_keys(psk, salt)
+        _, confirmation_key = derive_keys(psk, salt)
         auth_token = generate_handshake_auth(psk, salt)
 
         pad_len = os.urandom(1)[0] % 32
@@ -150,15 +153,20 @@ async def connect_tls(
         writer.write(handshake)
         await writer.drain()
 
-        server_crypto = TunnelCryptoSession(s2c_key)
+        confirmation_crypto = TunnelCryptoSession(confirmation_key)
         len_bytes = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
         frame_len = struct.unpack(">I", len_bytes)[0]
+        if frame_len < 18 or frame_len > MAX_HANDSHAKE_FRAME_SIZE:
+            raise ValueError("Invalid server confirmation frame length")
         ciphertext = await asyncio.wait_for(reader.readexactly(frame_len), timeout=timeout)
-        server_conf = server_crypto.decrypt_frame(ciphertext)
-        if server_conf != b"SERVER_OK":
+        server_conf = confirmation_crypto.decrypt_frame(ciphertext)
+        if not server_conf.startswith(SERVER_CONFIRMATION_PREFIX) or len(server_conf) != len(SERVER_CONFIRMATION_PREFIX) + SERVER_NONCE_LEN:
             raise PermissionError("Server authentication verification failed over TLS")
 
+        server_nonce = server_conf[len(SERVER_CONFIRMATION_PREFIX):]
+        c2s_key, s2c_key = derive_session_keys(psk, salt, server_nonce)
         client_crypto = TunnelCryptoSession(c2s_key)
+        server_crypto = TunnelCryptoSession(s2c_key)
         return TlsConnection(
             reader=reader,
             writer=writer,
@@ -189,4 +197,3 @@ async def accept_tls(
         return TlsConnection(reader, writer, obfs_conn)
     except Exception:
         return None
-

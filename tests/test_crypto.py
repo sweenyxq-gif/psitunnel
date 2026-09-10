@@ -1,7 +1,9 @@
 import unittest
 from psitunnel.common.crypto import (
     TunnelCryptoSession,
+    derive_handshake_key,
     derive_keys,
+    derive_session_keys,
     generate_handshake_auth,
     verify_handshake_auth,
 )
@@ -28,6 +30,22 @@ class TestCrypto(unittest.TestCase):
         # Wrong salt should fail
         self.assertFalse(verify_handshake_auth(psk, b"y" * 32, auth_token))
 
+    def test_handshake_and_traffic_keys_are_separated(self):
+        psk = "my-secret-psk-12345"
+        client_salt = b"s" * 32
+        handshake_key = derive_handshake_key(psk, client_salt)
+        c2s_key, s2c_key = derive_session_keys(psk, client_salt, b"a" * 32)
+
+        self.assertNotEqual(handshake_key, c2s_key)
+        self.assertNotEqual(handshake_key, s2c_key)
+
+    def test_server_nonce_changes_session_keys(self):
+        psk = "my-secret-psk-12345"
+        client_salt = b"s" * 32
+        keys_1 = derive_session_keys(psk, client_salt, b"a" * 32)
+        keys_2 = derive_session_keys(psk, client_salt, b"b" * 32)
+        self.assertNotEqual(keys_1, keys_2)
+
     def test_aead_framing_and_padding(self):
         key = b"\x01" * 32
         sender = TunnelCryptoSession(key)
@@ -51,4 +69,3 @@ class TestCrypto(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

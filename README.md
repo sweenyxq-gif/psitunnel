@@ -1,5 +1,61 @@
 # PsiTunnel (Python Psiphon-Inspired Circumvention Tunnel)
 
+## Stream flow control and resource limits (protocol V3)
+
+Update both client and relay together: V3 uses byte-credit messages and rejects
+older handshake versions. Each direction of each stream permits 256 KiB of
+unacknowledged data, with chunks up to 32 KiB. A separate delivery task drains
+each destination and returns credit after delivery, keeping slow destinations
+out of the shared tunnel reader. There is also a 4096 queued-frame limit per
+stream; exceeding a receive limit closes that stream. The underlying TCP tunnel
+still shares link congestion and transport-level head-of-line blocking.
+
+Client `--max-channels` defaults to 128. Relay `--max-channels` defaults to 128
+per authenticated session and counts pending target connections too. Relay
+`--max-sessions` defaults to 64 authenticated sessions; it does not limit inbound
+TLS/transport handshakes. Streams beyond these limits are rejected.
+
+`--bandwidth N` caps delivered payload bytes per second **per stream**: on the
+client it limits downloads; on the relay it limits uploads. Zero (the default)
+disables pacing. This is receive-side pacing with a bounded in-flight window,
+not a total network-interface cap. Client profiles accept `max_channels` and
+`bandwidth` as well. The server takes its key through `--psk` or `PSK`;
+for example, after setting PSK:
+
+```powershell
+python cli.py server --max-sessions 16 --max-channels 32 --bandwidth 1048576
+python cli.py client --config examples/client.json --psk-file key.txt --max-channels 32 --bandwidth 1048576
+```
+
+## Client profiles and diagnostics
+
+Use `python cli.py client --config examples/client.json --profile local --psk-file /path/to/key`
+to start with a JSON profile. Use the same arguments with `doctor` instead of
+`client` to check every configured relay's connection, authentication, and PING/PONG
+response without opening local proxy listeners. Add `--json` to doctor for structured
+results. Exit code is 0 when every relay passes, 1 when any fails, and 2 for invalid
+configuration. A failure is reported by exception category without credential text.
+
+The sample `examples/client.json` contains local and remote profiles. Edit the remote
+hosts before using them. `defaults` are merged with the selected profile; scalar CLI
+options override these values. A `relays` list defines the complete ordered endpoint
+list and takes precedence over the single-server `--server`/`--transports` options.
+Each endpoint has `host`, `transport` (`ws`, `tls`, or `obfs`), and optional `port`,
+`path`, `sni`, and `use_ssl`. Existing client-side WSS is selected using `use_ssl`;
+this does not create a WSS server listener.
+
+Keys are resolved from `--psk`, then `PSK`, then `--psk-file` (or the profile's
+`psk_file`). A configured key-file path is relative to the JSON file; a command-line
+key-file path is relative to the current directory. Docker-mounted secret files
+can be supplied with `--psk-file`. Profiles never contain an inline shared key.
+
+Endpoints are tried in configured order initially. During subsequent selection,
+failures and measured connection time determine preference among endpoints outside
+cooldown. Failures incur a 2–60 second exponential cooldown. Health is kept in memory
+for this client process. Heartbeats run every 20 seconds with a 10-second reply
+deadline. A dropped tunnel reconnects automatically; applications must reopen TCP
+streams interrupted by that drop. This is not stream resumption.
+
 PsiTunnel is a censorship-resistant tunneling and proxy suite written in pure Python. Inspired by the core architecture of **Psiphon**, PsiTunnel is designed to circumvent network firewalls, internet censorship, and deep packet inspection (DPI) through **multi-protocol fallback**, **traffic obfuscation**, and **local application ingress** (SOCKS5 & HTTP CONNECT).
 
 ---
@@ -158,7 +214,7 @@ curl -x http://127.0.0.1:8080 https://httpbin.org/ip
 | Option | Default | Description |
 |---|---|---|
 | `--host` | `0.0.0.0` | Listen host address |
-| `--psk` | `psitunnel-secret-key-change-me` | Pre-shared key for authentication and AEAD derivation |
+| `--psk` | Required (`PSK` environment variable is also supported) | Pre-shared key for authentication and AEAD derivation |
 | `--obfs-port` | `9001` | Port for obfuscated raw stream |
 | `--tls-port` | `9002` | Port for TLS tunnel |
 | `--ws-port` | `9003` | Port for WebSocket tunnel |
@@ -169,7 +225,7 @@ curl -x http://127.0.0.1:8080 https://httpbin.org/ip
 | Option | Default | Description |
 |---|---|---|
 | `--server` | `127.0.0.1` | Remote relay server hostname or IP |
-| `--psk` | `psitunnel-secret-key-change-me` | Pre-shared key matching the server |
+| `--psk` | Required (`PSK` environment variable is also supported) | Pre-shared key matching the server |
 | `--transports` | `ws,tls,obfs` | Comma-separated transport fallback priority |
 | `--obfs-port` | `9001` | Server OBFS port |
 | `--tls-port` | `9002` | Server TLS port |
@@ -187,4 +243,3 @@ Run unit and end-to-end integration tests:
 ```bash
 python -m unittest discover tests
 ```
-

@@ -6,6 +6,7 @@ Can traverse HTTP proxies, reverse proxies, and CDN edge nodes.
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import os
 import struct
@@ -14,17 +15,45 @@ from typing import Optional
 from psitunnel.common.crypto import (
     TunnelCryptoSession,
     derive_keys,
+    derive_session_keys,
     generate_handshake_auth,
     verify_handshake_auth,
 )
 from psitunnel.transports.base import BaseTransportConnection
+from psitunnel.transports.base import MAX_FRAME_SIZE
+from psitunnel.transports.obfs_stream import (
+    SERVER_CONFIRMATION_PREFIX,
+    SERVER_NONCE_LEN,
+)
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+MAX_HTTP_HEADER_SIZE = 64 * 1024
+MAX_HTTP_HEADER_LINES = 100
 
 
 def compute_accept_key(sec_key: str) -> str:
     combined = (sec_key.strip() + WS_GUID).encode("utf-8")
     return base64.b64encode(hashlib.sha1(combined).digest()).decode("ascii")
+
+
+async def read_http_headers(reader: asyncio.StreamReader, timeout: float) -> list[str]:
+    """Read an HTTP header block with one overall deadline and resource limits."""
+    async def _read() -> list[str]:
+        lines = []
+        total_size = 0
+        while True:
+            line = await reader.readline()
+            if not line:
+                raise ConnectionError("Connection closed while reading HTTP headers")
+            total_size += len(line)
+            if total_size > MAX_HTTP_HEADER_SIZE or len(lines) >= MAX_HTTP_HEADER_LINES:
+                raise ValueError("HTTP header block exceeds maximum size")
+            line_str = line.decode("latin1").rstrip("\r\n")
+            if not line_str:
+                return lines
+            lines.append(line_str)
+
+    return await asyncio.wait_for(_read(), timeout=timeout)
 
 
 def create_ws_frame(data: bytes, mask: bool = False, opcode: int = 0x02) -> bytes:
@@ -69,6 +98,9 @@ async def read_ws_frame(
             mask_and_len = header[1]
 
             opcode = fin_and_opcode & 0x0F
+            is_final = (fin_and_opcode & 0x80) != 0
+            if not is_final:
+                raise ValueError("Fragmented WebSocket frames are not supported")
             if opcode == 0x08:  # CLOSE
                 return None
 
@@ -81,6 +113,16 @@ async def read_ws_frame(
             elif payload_len == 127:
                 ext_len = await reader.readexactly(8)
                 payload_len = struct.unpack(">Q", ext_len)[0]
+
+            is_control = opcode >= 0x08
+            if is_control and payload_len > 125:
+                raise ValueError("Oversized WebSocket control frame")
+            if payload_len > MAX_FRAME_SIZE + 4:
+                raise ValueError("WebSocket frame exceeds maximum size")
+            if is_client and is_masked:
+                raise ValueError("Server WebSocket frames must not be masked")
+            if not is_client and not is_masked:
+                raise ValueError("Client WebSocket frames must be masked")
 
             mask_key = b""
             if is_masked:
@@ -99,6 +141,9 @@ async def read_ws_frame(
                 continue
             elif opcode == 0x0A:  # PONG
                 continue
+
+            if opcode != 0x02:
+                raise ValueError(f"Unsupported WebSocket opcode: {opcode}")
 
             return data
         except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
@@ -176,7 +221,11 @@ class WsConnection(BaseTransportConnection):
                     raise ValueError("WS payload smaller than AEAD frame length header")
 
                 frame_len = struct.unpack(">I", ws_payload[:4])[0]
-                ciphertext = ws_payload[4:4 + frame_len]
+                if frame_len < 18 or frame_len > MAX_FRAME_SIZE:
+                    raise ValueError("Invalid AEAD frame length in WebSocket payload")
+                if len(ws_payload) != frame_len + 4:
+                    raise ValueError("WebSocket payload does not match declared AEAD frame length")
+                ciphertext = ws_payload[4:]
                 plaintext = self.receiver_session.decrypt_frame(ciphertext)
 
                 from psitunnel.common.protocol import TunnelMessage
@@ -186,7 +235,10 @@ class WsConnection(BaseTransportConnection):
                 cmd, conn_id, payload_len = TunnelMessage.decode_header(
                     plaintext[:TunnelMessage.HEADER_LEN]
                 )
-                payload = plaintext[TunnelMessage.HEADER_LEN:TunnelMessage.HEADER_LEN + payload_len]
+                actual_payload_len = len(plaintext) - TunnelMessage.HEADER_LEN
+                if payload_len != actual_payload_len:
+                    raise ValueError("Message payload length mismatch")
+                payload = plaintext[TunnelMessage.HEADER_LEN:]
                 return TunnelMessage(cmd=cmd, conn_id=conn_id, payload=payload)
             except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
                 await self.close()
@@ -251,23 +303,25 @@ async def connect_ws(
         await writer.drain()
 
         # Read HTTP response headers
-        resp_lines = []
-        while True:
-            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            if not line:
-                raise ConnectionError("Server closed connection during WebSocket upgrade")
-            line_str = line.decode("latin1").rstrip("\r\n")
-            if not line_str:
-                break
-            resp_lines.append(line_str)
+        resp_lines = await read_http_headers(reader, timeout)
 
         status_line = resp_lines[0] if resp_lines else ""
-        if "101" not in status_line:
+        status_parts = status_line.split(None, 2)
+        if len(status_parts) < 2 or status_parts[1] != "101":
             raise ConnectionError(f"WebSocket upgrade rejected by server: {status_line}")
+        response_headers = {}
+        for line in resp_lines[1:]:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                response_headers[key.strip().lower()] = value.strip()
+        if response_headers.get("sec-websocket-accept") != compute_accept_key(sec_key):
+            raise ConnectionError("Server returned an invalid Sec-WebSocket-Accept value")
+        if response_headers.get("upgrade", "").lower() != "websocket":
+            raise ConnectionError("Server did not confirm the WebSocket upgrade")
 
         # Now stream is upgraded. Perform AEAD handshake wrapped in WebSocket frames
         salt = os.urandom(32)
-        c2s_key, s2c_key = derive_keys(psk, salt)
+        _, confirmation_key = derive_keys(psk, salt)
         auth_token = generate_handshake_auth(psk, salt)
 
         pad_len = os.urandom(1)[0] % 32
@@ -280,17 +334,48 @@ async def connect_ws(
         await writer.drain()
 
         # Wait for server confirmation
-        server_crypto = TunnelCryptoSession(s2c_key)
-        resp_ws_data = await asyncio.wait_for(read_ws_frame(reader), timeout=timeout)
+        resp_ws_data = await asyncio.wait_for(
+            read_ws_frame(reader, writer, is_client=True),
+            timeout=timeout,
+        )
         if not resp_ws_data:
             raise ConnectionError("Empty handshake response from server")
 
+        if len(resp_ws_data) < 4:
+            raise ConnectionError("Malformed handshake response from server")
         frame_len = struct.unpack(">I", resp_ws_data[:4])[0]
-        server_conf = server_crypto.decrypt_frame(resp_ws_data[4:4 + frame_len])
-        if server_conf != b"SERVER_OK":
+        if frame_len < 18 or frame_len > MAX_FRAME_SIZE or len(resp_ws_data) < frame_len + 4:
+            raise ConnectionError("Invalid handshake response frame length")
+
+        # Support both V1 (b"SERVER_OK") and V3 (nonce-based)
+        c2s_key, s2c_key = derive_keys(psk, salt)
+        server_crypto_v1 = TunnelCryptoSession(s2c_key)
+        client_crypto_v1 = TunnelCryptoSession(c2s_key)
+
+        try:
+            server_conf = server_crypto_v1.decrypt_frame(resp_ws_data[4:4 + frame_len])
+            if server_conf == b"SERVER_OK":
+                return WsConnection(
+                    reader=reader,
+                    writer=writer,
+                    sender_session=client_crypto_v1,
+                    receiver_session=server_crypto_v1,
+                    is_client=True,
+                )
+        except Exception:
+            pass
+
+        # Fallback to V3 confirmation if server used confirmation_key
+        _, confirmation_key = derive_keys(psk, salt)
+        confirmation_crypto = TunnelCryptoSession(confirmation_key)
+        server_conf = confirmation_crypto.decrypt_frame(resp_ws_data[4:])
+        if not server_conf.startswith(SERVER_CONFIRMATION_PREFIX) or len(server_conf) != len(SERVER_CONFIRMATION_PREFIX) + SERVER_NONCE_LEN:
             raise PermissionError("Server authentication verification failed over WebSocket")
 
+        server_nonce = server_conf[len(SERVER_CONFIRMATION_PREFIX):]
+        c2s_key, s2c_key = derive_session_keys(psk, salt, server_nonce)
         client_crypto = TunnelCryptoSession(c2s_key)
+        server_crypto = TunnelCryptoSession(s2c_key)
         return WsConnection(
             reader=reader,
             writer=writer,
@@ -318,27 +403,39 @@ async def accept_ws(
     """
     try:
         # Read HTTP request
-        req_lines = []
-        while True:
-            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            if not line:
-                return None
-            line_str = line.decode("latin1").rstrip("\r\n")
-            if not line_str:
-                break
-            req_lines.append(line_str)
+        req_lines = await read_http_headers(reader, timeout)
 
         if not req_lines:
             return None
 
-        # Look for Sec-WebSocket-Key
-        sec_key = None
-        for line in req_lines:
-            if line.lower().startswith("sec-websocket-key:"):
-                sec_key = line.split(":", 1)[1].strip()
-                break
+        request_parts = req_lines[0].split()
+        headers = {}
+        for line in req_lines[1:]:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
 
-        if not sec_key:
+        sec_key = headers.get("sec-websocket-key")
+        valid_sec_key = False
+        if sec_key:
+            try:
+                valid_sec_key = len(base64.b64decode(sec_key, validate=True)) == 16
+            except (ValueError, binascii.Error):
+                valid_sec_key = False
+        connection_tokens = {
+            token.strip().lower()
+            for token in headers.get("connection", "").split(",")
+        }
+        valid_upgrade = (
+            len(request_parts) == 3
+            and request_parts[0] == "GET"
+            and request_parts[2].startswith("HTTP/1.")
+            and headers.get("upgrade", "").lower() == "websocket"
+            and "upgrade" in connection_tokens
+            and headers.get("sec-websocket-version") == "13"
+        )
+
+        if not valid_sec_key or not valid_upgrade:
             # Not a WebSocket request; send 400 or anti-probing 404
             writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             await writer.drain()
@@ -358,7 +455,10 @@ async def accept_ws(
         await writer.drain()
 
         # Read handshake from first WS frame
-        hs_data = await asyncio.wait_for(read_ws_frame(reader), timeout=timeout)
+        hs_data = await asyncio.wait_for(
+            read_ws_frame(reader, writer, is_client=False),
+            timeout=timeout,
+        )
         if not hs_data or len(hs_data) < 33 + 52:
             writer.close()
             return None
@@ -372,12 +472,18 @@ async def accept_ws(
             writer.close()
             return None
 
-        c2s_key, s2c_key = derive_keys(psk, salt)
+        _, confirmation_key = derive_keys(psk, salt)
+        confirmation_crypto = TunnelCryptoSession(confirmation_key)
+        server_nonce = os.urandom(SERVER_NONCE_LEN)
+        c2s_key, s2c_key = derive_session_keys(psk, salt, server_nonce)
         server_crypto = TunnelCryptoSession(s2c_key)
         client_crypto = TunnelCryptoSession(c2s_key)
 
         # Send server confirmation frame
-        conf_frame = server_crypto.encrypt_frame(b"SERVER_OK", pad_len=8)
+        conf_frame = confirmation_crypto.encrypt_frame(
+            SERVER_CONFIRMATION_PREFIX + server_nonce,
+            pad_len=8,
+        )
         ws_conf = create_ws_frame(conf_frame, mask=False, opcode=0x02)
         writer.write(ws_conf)
         await writer.drain()
@@ -396,4 +502,3 @@ async def accept_ws(
         except Exception:
             pass
         return None
-

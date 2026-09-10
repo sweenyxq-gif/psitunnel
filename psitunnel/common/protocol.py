@@ -4,7 +4,7 @@ Multiplexing protocol and message definitions for PsiTunnel.
 
 import enum
 import struct
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 class Command(enum.IntEnum):
@@ -15,6 +15,7 @@ class Command(enum.IntEnum):
     CMD_PING = 0x05       # Client -> Relay: heartbeat
     CMD_PONG = 0x06       # Relay -> Client: heartbeat response
     CMD_ERROR = 0x07      # Relay -> Client: error notice
+    CMD_WINDOW = 0x08     # Receiver grants consumed bytes back to sender
 
 
 class AddressType(enum.IntEnum):
@@ -58,6 +59,10 @@ def encode_connect_payload(host: str, port: int) -> bytes:
       [2 bytes port] + [1 byte addr_type] + [1 byte host_len] + [host_len bytes host]
     """
     host_bytes = host.encode("utf-8")
+    if not host_bytes:
+        raise ValueError("Target host cannot be empty")
+    if not 1 <= port <= 65535:
+        raise ValueError("Target port must be between 1 and 65535")
     if len(host_bytes) > 255:
         raise ValueError(f"Target host length {len(host_bytes)} exceeds maximum limit of 255 bytes")
     return struct.pack(">HBB", port, AddressType.DOMAIN, len(host_bytes)) + host_bytes
@@ -70,8 +75,14 @@ def decode_connect_payload(payload: bytes) -> Tuple[str, int]:
     if len(payload) < 4:
         raise ValueError("Invalid connect payload: too short")
     port, addr_type, host_len = struct.unpack(">HBB", payload[:4])
-    if len(payload) < 4 + host_len:
-        raise ValueError("Invalid connect payload: truncated host")
-    host = payload[4:4 + host_len].decode("utf-8", errors="replace")
+    if addr_type not in (AddressType.IPV4, AddressType.DOMAIN, AddressType.IPV6):
+        raise ValueError("Invalid connect payload: unsupported address type")
+    if host_len == 0 or len(payload) != 4 + host_len:
+        raise ValueError("Invalid connect payload: host length mismatch")
+    if port == 0:
+        raise ValueError("Invalid connect payload: port cannot be zero")
+    try:
+        host = payload[4:].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Invalid connect payload: host is not valid UTF-8") from exc
     return host, port
-

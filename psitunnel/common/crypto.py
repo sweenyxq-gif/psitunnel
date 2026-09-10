@@ -17,7 +17,7 @@ class TunnelCryptoSession:
     Manages bidirectional AEAD encryption/decryption state with monotonic nonces.
     """
 
-    MAGIC_AUTH = b"PSITUNNEL_V1"
+    MAGIC_AUTH = b"PSITUNNEL_V3"
 
     def __init__(self, key: bytes):
         if len(key) != 32:
@@ -91,38 +91,80 @@ def derive_keys(psk: str | bytes, salt: bytes) -> Tuple[bytes, bytes]:
     return c2s_key, s2c_key
 
 
+def derive_handshake_key(psk: str | bytes, salt: bytes) -> bytes:
+    """Derives a key used only to authenticate the client handshake."""
+    if isinstance(psk, str):
+        psk = psk.encode("utf-8")
+
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"psitunnel-client-handshake",
+    ).derive(psk)
+
+
+def derive_session_keys(
+    psk: str | bytes,
+    client_salt: bytes,
+    server_nonce: bytes,
+) -> Tuple[bytes, bytes]:
+    """Derives fresh traffic keys bound to randomness from both peers."""
+    if len(client_salt) != 32 or len(server_nonce) != 32:
+        raise ValueError("Client salt and server nonce must each be 32 bytes")
+    transcript_salt = hashes.Hash(hashes.SHA256())
+    transcript_salt.update(b"psitunnel-session-v2")
+    transcript_salt.update(client_salt)
+    transcript_salt.update(server_nonce)
+    return derive_keys(psk, transcript_salt.finalize())
+
+
 def generate_handshake_auth(psk: str | bytes, salt: bytes) -> bytes:
     """
     Generates an authenticated handshake token containing timestamp + magic bytes,
-    encrypted with the derived client-to-server key.
+    encrypted with the derived client-to-server key (V1 compatible).
     """
     c2s_key, _ = derive_keys(psk, salt)
     aead = ChaCha20Poly1305(c2s_key)
     # 8-byte unix timestamp + magic string + random padding
     ts = int(time.time())
-    payload = struct.pack(">Q", ts) + TunnelCryptoSession.MAGIC_AUTH + os.urandom(16)
+    payload = struct.pack(">Q", ts) + b"PSITUNNEL_V1" + os.urandom(16)
     nonce = b"\x00" * 12
     return aead.encrypt(nonce, payload, None)
 
 
-def verify_handshake_auth(psk: str | bytes, salt: bytes, auth_tag_and_ciphertext: bytes, max_skew_sec: int = 120) -> bool:
+def verify_handshake_auth(psk: str | bytes, salt: bytes, auth_tag_and_ciphertext: bytes, max_skew_sec: int = 300) -> bool:
     """
     Verifies that the handshake token matches the PSK and is within the allowed clock skew window.
+    Supports both V1 and V3 tokens.
     """
+    # 1. Try V1 (c2s_key)
     try:
         c2s_key, _ = derive_keys(psk, salt)
         aead = ChaCha20Poly1305(c2s_key)
-        nonce = b"\x00" * 12
-        plaintext = aead.decrypt(nonce, auth_tag_and_ciphertext, None)
-        if len(plaintext) < 8 + len(TunnelCryptoSession.MAGIC_AUTH):
-            return False
-        ts, magic = struct.unpack(f">Q{len(TunnelCryptoSession.MAGIC_AUTH)}s", plaintext[:8 + len(TunnelCryptoSession.MAGIC_AUTH)])
-        if magic != TunnelCryptoSession.MAGIC_AUTH:
-            return False
-        current_ts = int(time.time())
-        if abs(current_ts - ts) > max_skew_sec:
-            return False
-        return True
+        plaintext = aead.decrypt(b"\x00" * 12, auth_tag_and_ciphertext, None)
+        if len(plaintext) >= 8 + 12:
+            ts, magic = struct.unpack(">Q12s", plaintext[:20])
+            if magic == b"PSITUNNEL_V1":
+                current_ts = int(time.time())
+                if abs(current_ts - ts) <= max_skew_sec:
+                    return True
     except Exception:
-        return False
+        pass
+
+    # 2. Try V3 (derive_handshake_key)
+    try:
+        handshake_key = derive_handshake_key(psk, salt)
+        aead = ChaCha20Poly1305(handshake_key)
+        plaintext = aead.decrypt(b"\x00" * 12, auth_tag_and_ciphertext, None)
+        if len(plaintext) >= 8 + len(TunnelCryptoSession.MAGIC_AUTH):
+            ts, magic = struct.unpack(f">Q{len(TunnelCryptoSession.MAGIC_AUTH)}s", plaintext[:8 + len(TunnelCryptoSession.MAGIC_AUTH)])
+            if magic == TunnelCryptoSession.MAGIC_AUTH:
+                current_ts = int(time.time())
+                if abs(current_ts - ts) <= max_skew_sec:
+                    return True
+    except Exception:
+        pass
+
+    return False
 

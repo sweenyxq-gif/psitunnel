@@ -133,8 +133,8 @@ Top Recommended Providers:
 #### 1-Line Docker Deployment on Any VPS:
 ```bash
 docker run -d --name psitunnel --restart always -p 9003:9003 \
-  $(docker build -q .) \
-  server --ws-port 9003 --psk "my-super-secret-key-123"
+  -e PSK="my-super-secret-key-123" -e WS_PORT=9003 \
+  $(docker build -q .)
 ```
 
 ---

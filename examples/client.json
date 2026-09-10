@@ -1,0 +1,22 @@
+{
+  "default_profile": "local",
+  "defaults": {
+    "local_host": "127.0.0.1",
+    "socks_port": 1080,
+    "http_port": 8080
+  },
+  "profiles": {
+    "local": {
+      "relays": [
+        {"host": "127.0.0.1", "port": 9003, "transport": "ws"},
+        {"host": "127.0.0.1", "port": 9001, "transport": "obfs"}
+      ]
+    },
+    "remote": {
+      "relays": [
+        {"host": "relay-one.example.com", "port": 443, "transport": "ws", "use_ssl": true},
+        {"host": "relay-two.example.com", "port": 9001, "transport": "obfs"}
+      ]
+    }
+  }
+}

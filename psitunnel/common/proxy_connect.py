@@ -65,11 +65,19 @@ async def open_connection_with_upstream_proxy(
             status_text = status_line.decode("latin1", errors="replace").strip()
             raise ConnectionError(f"Upstream corporate proxy rejected CONNECT: {status_text}")
 
-        # Read remaining proxy headers
-        while True:
-            line = await reader.readline()
-            if not line or line == b"\r\n" or line == b"\n":
-                break
+        # Read remaining proxy headers with one deadline and a total size cap.
+        async def read_proxy_headers():
+            total_size = 0
+            for _ in range(100):
+                line = await reader.readline()
+                total_size += len(line)
+                if total_size > 64 * 1024:
+                    raise ValueError("Upstream proxy headers exceed maximum size")
+                if not line or line in (b"\r\n", b"\n"):
+                    return
+            raise ValueError("Upstream proxy sent too many headers")
+
+        await asyncio.wait_for(read_proxy_headers(), timeout=timeout)
 
         if ssl_context:
             loop = asyncio.get_running_loop()
@@ -89,4 +97,3 @@ async def open_connection_with_upstream_proxy(
         except Exception:
             pass
         raise
-

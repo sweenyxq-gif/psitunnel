@@ -12,6 +12,24 @@ from psitunnel.client.fallback_mgr import FallbackManager
 from psitunnel.common.logger import setup_logger
 
 
+MAX_HEADER_SIZE = 64 * 1024
+MAX_HEADER_LINES = 100
+
+
+def parse_connect_target(target: str) -> tuple[str, int]:
+    """Parse an HTTP CONNECT authority, including bracketed IPv6 literals."""
+    parsed = urlparse(f"//{target}")
+    if not parsed.hostname:
+        raise ValueError("CONNECT target is missing a host")
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError("CONNECT target contains an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("CONNECT target port is outside the valid range")
+    return parsed.hostname, port
+
+
 class LocalHttpProxyServer:
     def __init__(self, fallback_mgr: FallbackManager, host: str = "127.0.0.1", port: int = 8080):
         self.fallback_mgr = fallback_mgr
@@ -51,17 +69,10 @@ class LocalHttpProxyServer:
 
             if method == "CONNECT":
                 # HTTPS Tunneling
-                if ":" in target:
-                    dest_host, port_str = target.split(":", 1)
-                    dest_port = int(port_str)
-                else:
-                    dest_host, dest_port = target, 443
+                dest_host, dest_port = parse_connect_target(target)
 
                 # Read and discard remaining headers
-                while True:
-                    line = await reader.readline()
-                    if not line or line == b"\r\n" or line == b"\n":
-                        break
+                await self._read_headers(reader)
 
                 self.logger.info(f"HTTP CONNECT for {dest_host}:{dest_port}")
 
@@ -109,16 +120,11 @@ class LocalHttpProxyServer:
 
                 # Read remaining headers
                 headers = []
-                while True:
-                    line = await reader.readline()
-                    if not line:
-                        break
+                for line in await self._read_headers(reader, include_terminator=True):
                     # Strip Proxy-Connection header
                     if line.lower().startswith(b"proxy-connection:"):
                         continue
                     headers.append(line)
-                    if line == b"\r\n" or line == b"\n":
-                        break
 
                 initial_data += b"".join(headers)
 
@@ -156,3 +162,25 @@ class LocalHttpProxyServer:
             except Exception:
                 pass
 
+    async def _read_headers(
+        self,
+        reader: asyncio.StreamReader,
+        include_terminator: bool = False,
+    ) -> list[bytes]:
+        async def read_block() -> list[bytes]:
+            lines = []
+            total_size = 0
+            while True:
+                line = await reader.readline()
+                if not line:
+                    raise ConnectionError("Client closed while sending HTTP headers")
+                total_size += len(line)
+                if total_size > MAX_HEADER_SIZE or len(lines) >= MAX_HEADER_LINES:
+                    raise ValueError("HTTP header block exceeds maximum size")
+                if line in (b"\r\n", b"\n"):
+                    if include_terminator:
+                        lines.append(line)
+                    return lines
+                lines.append(line)
+
+        return await asyncio.wait_for(read_block(), timeout=10.0)

@@ -29,7 +29,14 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(decoded_host, host)
         self.assertEqual(decoded_port, port)
 
+    def test_rejects_malformed_connect_payload(self):
+        with self.assertRaises(ValueError):
+            decode_connect_payload(b"\x01\xbb\x03\x05abc")
+        with self.assertRaises(ValueError):
+            decode_connect_payload(b"\x00\x00\x03\x01a")
+        with self.assertRaises(ValueError):
+            encode_connect_payload("", 443)
+
 
 if __name__ == "__main__":
     unittest.main()
-
