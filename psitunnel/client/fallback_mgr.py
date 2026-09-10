@@ -58,7 +58,7 @@ class FallbackManager:
     Multiplexes local client connections over the active transport tunnel.
     """
 
-    def __init__(self, psk: str, candidate_endpoints: List[Dict[str, Any]], upstream_proxy: Optional[str] = None, max_channels=128, bandwidth=0):
+    def __init__(self, psk: str, candidate_endpoints: List[Dict[str, Any]], upstream_proxy: Optional[str] = None, max_channels=1024, bandwidth=0):
         """
         candidate_endpoints: list of dicts:
           [
@@ -197,7 +197,8 @@ class FallbackManager:
                     ch = self.channels.get(msg.conn_id)
                     if ch and not ch.local_writer.is_closing():
                         try:
-                            ch.flow.receive(msg.payload)
+                            ch.local_writer.write(msg.payload)
+                            await ch.local_writer.drain()
                         except Exception:
                             await self._close_channel(msg.conn_id, notify_remote=True)
 
@@ -206,16 +207,11 @@ class FallbackManager:
                     if ch and not ch.is_connected:
                         ch.connected_event.set()
                         self.channels.pop(msg.conn_id, None)
-                    elif ch:
-                        try:
-                            ch.flow.finish()
-                        except asyncio.QueueFull:
-                            await self._close_channel(msg.conn_id, notify_remote=True)
+                    else:
+                        await self._close_channel(msg.conn_id, notify_remote=False)
 
                 elif msg.cmd == Command.CMD_WINDOW:
-                    ch = self.channels.get(msg.conn_id)
-                    if ch:
-                        ch.flow.update(msg.payload)
+                    pass
 
                 elif msg.cmd == Command.CMD_ERROR:
                     ch = self.channels.get(msg.conn_id)
@@ -245,7 +241,8 @@ class FallbackManager:
             for conn_id, existing_channel in list(self.channels.items()):
                 if existing_channel.transport is transport:
                     ch = self.channels.pop(conn_id, None)
-                    ch.flow.close()
+                    if ch.flow:
+                        ch.flow.close()
                     ch.error_reason = "Active transport connection dropped"
                     ch.connected_event.set()
                     try:
@@ -342,15 +339,13 @@ class FallbackManager:
                 if asyncio.iscoroutine(res):
                     await res
 
-            channel.flow.start()
-
             # Forward local reader data into the tunnel
             while self._running and not transport.is_closed and not local_writer.is_closing():
                 data = await local_reader.read(32768)
                 if not data:
                     break
                 data_msg = TunnelMessage(Command.CMD_DATA, conn_id=conn_id, payload=data)
-                await channel.flow.send(data)
+                await transport.send_message(data_msg)
                 self.bytes_sent += len(data)
 
             return True
@@ -362,13 +357,15 @@ class FallbackManager:
             if channel.is_connected:
                 await self._close_channel(conn_id, notify_remote=True, close_local=True)
             else:
-                channel.flow.close()
+                if channel.flow:
+                    channel.flow.close()
                 self.channels.pop(conn_id, None)
 
     async def _close_channel(self, conn_id: int, notify_remote: bool = False, close_local: bool = True):
         ch = self.channels.pop(conn_id, None)
         if ch:
-            ch.flow.close()
+            if ch.flow:
+                ch.flow.close()
         if ch and close_local:
             try:
                 ch.local_writer.close()

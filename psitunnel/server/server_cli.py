@@ -13,8 +13,8 @@ from psitunnel.server.relay import PsiTunnelServer
 
 def main():
     parser = argparse.ArgumentParser(description="PsiTunnel Censorship-Resistant Relay Server")
-    parser.add_argument("--max-channels", type=int, default=128)
-    parser.add_argument("--max-sessions", type=int, default=64)
+    parser.add_argument("--max-channels", type=int, default=1024)
+    parser.add_argument("--max-sessions", type=int, default=256)
     parser.add_argument("--bandwidth", type=int, default=0, help="Upload bytes/sec per stream; 0 is unlimited")
     parser.add_argument("--host", default="0.0.0.0", help="Host address to bind (default: 0.0.0.0)")
     parser.add_argument("--psk", default=os.getenv("PSK"), help="Pre-shared key (or set PSK)")

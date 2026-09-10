@@ -73,15 +73,9 @@ class RelaySession:
                 elif msg.cmd == Command.CMD_DATA:
                     await self._handle_data(msg.conn_id, msg.payload)
                 elif msg.cmd == Command.CMD_CLOSE:
-                    channel = self.channels.get(msg.conn_id)
-                    if channel:
-                        channel.flow.finish()
-                    else:
-                        await self._handle_close(msg.conn_id)
+                    await self._handle_close(msg.conn_id, notify_remote=False)
                 elif msg.cmd == Command.CMD_WINDOW:
-                    channel = self.channels.get(msg.conn_id)
-                    if channel:
-                        channel.flow.update(msg.payload)
+                    pass
                 elif msg.cmd == Command.CMD_PING:
                     pong = TunnelMessage(Command.CMD_PONG, conn_id=0, payload=msg.payload)
                     await self.transport.send_message(pong, inject_padding=False)
@@ -121,10 +115,8 @@ class RelaySession:
                 return
 
             channel = Channel(conn_id, host, port, reader, writer)
-            channel.flow = StreamFlow(self.transport, conn_id, writer,
-                lambda: self._handle_close(conn_id, notify_remote=True), self.bandwidth)
+            channel.flow = None
             self.channels[conn_id] = channel
-            channel.flow.start()
 
             # Notify client that remote socket is connected
             connected_msg = TunnelMessage(Command.CMD_CONNECTED, conn_id=conn_id)
@@ -143,12 +135,12 @@ class RelaySession:
     async def _forward_target_to_tunnel(self, channel: Channel):
         """Reads target internet socket and sends CMD_DATA back to client."""
         try:
-            while self._running:
+            while self._running and not self.transport.is_closed:
                 data = await channel.reader.read(32768)
                 if not data:
                     break
                 data_msg = TunnelMessage(Command.CMD_DATA, conn_id=channel.conn_id, payload=data)
-                await channel.flow.send(data)
+                await self.transport.send_message(data_msg)
         except Exception as e:
             self.logger.debug(f"[Conn #{channel.conn_id}] Target read error: {e}")
         finally:
@@ -158,7 +150,8 @@ class RelaySession:
         channel = self.channels.get(conn_id)
         if channel and not channel.writer.is_closing():
             try:
-                channel.flow.receive(payload)
+                channel.writer.write(payload)
+                await channel.writer.drain()
             except Exception as e:
                 self.logger.debug(f"[Conn #{conn_id}] Target write error: {e}")
                 await self._handle_close(conn_id, notify_remote=True)
@@ -170,7 +163,8 @@ class RelaySession:
 
         channel = self.channels.pop(conn_id, None)
         if channel:
-            channel.flow.close()
+            if channel.flow:
+                channel.flow.close()
             if channel.read_task and channel.read_task is not asyncio.current_task() and not channel.read_task.done():
                 channel.read_task.cancel()
             try:

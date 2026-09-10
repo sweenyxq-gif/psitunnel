@@ -15,7 +15,7 @@ from psitunnel.client.config import parse_client_args
 
 def create_parser():
     parser = argparse.ArgumentParser(description="PsiTunnel Censorship-Resistant Client")
-    parser.add_argument("--max-channels", type=int, default=128, help="Maximum simultaneous streams")
+    parser.add_argument("--max-channels", type=int, default=1024, help="Maximum simultaneous streams")
     parser.add_argument("--bandwidth", type=int, default=0, help="Download bytes/sec per stream; 0 is unlimited")
     parser.add_argument("--server", default="127.0.0.1", help="Remote relay server hostname or IP")
     parser.add_argument("--psk", default=os.getenv("PSK"), help="Pre-shared key (or set PSK)")
