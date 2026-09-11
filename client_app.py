@@ -52,10 +52,15 @@ def load_saved_config():
     return {}
 
 
-def save_config(host: str, port: int, psk: str):
+def save_config(host: str, port: int, psk: str, upstream_proxy: str = ""):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"server": host, "port": port, "psk": psk}, f, indent=2)
+            json.dump({
+                "server": host,
+                "port": port,
+                "psk": psk,
+                "upstream_proxy": upstream_proxy,
+            }, f, indent=2)
     except Exception:
         pass
 
@@ -89,7 +94,12 @@ def launch_chrome_with_proxy(socks_port: int = 1080):
         args = [
             chrome_bin,
             f"--proxy-server=socks5://127.0.0.1:{socks_port}",
+            "--disable-quic",
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--force-webrtc-ip-handling-policy",
             f"--user-data-dir={user_data}",
+            "--no-first-run",
+            "--no-default-browser-check",
             "https://api.ipify.org",
         ]
         try:
@@ -123,6 +133,7 @@ def main():
     default_host = saved.get("server", "psitunnel.onrender.com")
     default_port = saved.get("port", 443)
     default_psk = saved.get("psk", "my-super-secret-key-123")
+    default_upstream = saved.get("upstream_proxy", "")
 
     # 1. Prompt for Relay Host / URL
     print(f"\nEnter the hosted relay server URL or hostname:")
@@ -148,16 +159,32 @@ def main():
     raw_psk = input(f"Secret Key [{default_psk}]: ").strip()
     psk = raw_psk if raw_psk else default_psk
 
-    # 4. Prompt for Chrome launch
+    # 4. Proxy Chain (upstream proxy)
+    print(f"\nProxy Chain — Route PsiTunnel through an upstream proxy?")
+    print(f"  Leave blank to connect directly.  Examples:")
+    print(f"    http://corp-proxy.company.com:8080")
+    print(f"    http://user:pass@10.0.0.1:3128")
+    print(f"    socks5://127.0.0.1:9050   (Tor)")
+    if default_upstream:
+        print(f"    (Press Enter to reuse: {default_upstream})")
+    raw_upstream = input(f"Upstream Proxy [{default_upstream or 'none'}]: ").strip()
+    if raw_upstream.lower() in ("none", "no", "off", "disable", "disabled"):
+        upstream_proxy = ""
+    else:
+        upstream_proxy = raw_upstream if raw_upstream else default_upstream
+
+    # 5. Prompt for Chrome launch
     print(f"\nLaunch Google Chrome automatically with this proxy? [Y/n]:")
     raw_chrome = input("Launch Chrome [Y]: ").strip().lower()
     auto_chrome = raw_chrome not in ("n", "no")
 
     # Save preferences for next launch
-    save_config(host, port, psk)
+    save_config(host, port, psk, upstream_proxy)
 
     print("\n" + "-" * 68)
     print(f" Connecting to : {host}:{port} [WSS]")
+    if upstream_proxy:
+        print(f" Proxy Chain   : {upstream_proxy} → {host}:{port}")
     print(f" Local SOCKS5  : socks5://127.0.0.1:1080")
     print(f" Local HTTP    : http://127.0.0.1:8080")
     print("-" * 68)
@@ -173,6 +200,7 @@ def main():
     fallback_mgr = FallbackManager(
         psk=psk,
         candidate_endpoints=candidate_endpoints,
+        upstream_proxy=upstream_proxy if upstream_proxy else None,
         max_channels=1024,
         bandwidth=0,
     )
@@ -234,12 +262,25 @@ def main():
         print(" [SUCCESS] PsiTunnel is active and protecting your traffic!")
         print(" SOCKS5 Proxy : socks5://127.0.0.1:1080")
         print(" HTTP Proxy   : http://127.0.0.1:8080")
+        if upstream_proxy:
+            print(f" Chain Route  : You → {upstream_proxy} → {host}:{port} → Internet")
         print("=" * 60 + "\n")
 
         if auto_chrome:
             launch_chrome_with_proxy(1080)
 
-        print("[ACTIVE] Proxy is running. Press Ctrl+C at any time to disconnect.\n")
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetConsoleTitleW("PsiTunnel Proxy [ACTIVE] - Minimize to taskbar while browsing")
+            except Exception:
+                pass
+
+        print("-" * 64)
+        print(" [NOTE] KEEP THIS WINDOW OPEN (OR MINIMIZED) WHILE BROWSING!")
+        print(" If this black window is closed, your proxy connection will stop.")
+        print(" To disconnect, come back here and press Ctrl+C.")
+        print("-" * 64 + "\n")
 
         monitor_task = asyncio.create_task(stats_monitor())
         stop_event = asyncio.Event()

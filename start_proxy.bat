@@ -10,8 +10,8 @@ start /min cmd /c "python cli.py client --server psitunnel.onrender.com --ws-por
 :: Wait 2 seconds for tunnel to establish
 timeout /t 2 /nobreak >nul
 
-:: Launch Chrome through SOCKS5 proxy
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="%TEMP%\chrome_proxy"
+:: Launch Chrome through SOCKS5 proxy with WebRTC protection and QUIC disabled
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --disable-quic --webrtc-ip-handling-policy=disable_non_proxied_udp --force-webrtc-ip-handling-policy --user-data-dir="%TEMP%\chrome_proxy" --no-first-run --no-default-browser-check https://api.ipify.org
 
 echo ============================================================
 echo Done! Chrome is open and protected by PsiTunnel.

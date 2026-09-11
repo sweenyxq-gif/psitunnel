@@ -331,7 +331,7 @@ class FallbackManager:
                 return False
 
             if not channel.is_connected:
-                self.logger.warning(f"[Conn #{conn_id}] Relay rejected connection to {dest_host}:{dest_port}: {channel.error_reason}")
+                self.logger.debug(f"[Conn #{conn_id}] Relay rejected connection to {dest_host}:{dest_port}: {channel.error_reason}")
                 await self._close_channel(conn_id, notify_remote=False, close_local=False)
                 return False
 

@@ -4,7 +4,10 @@ Handles multi-transport ingress, channel multiplexing, and target internet egres
 """
 
 import asyncio
+import ipaddress
 import logging
+import socket
+import time
 from typing import Dict, List, Optional, Tuple
 
 from psitunnel.common.logger import setup_logger
@@ -18,6 +21,47 @@ from psitunnel.transports.base import BaseTransportConnection
 from psitunnel.transports.obfs_stream import accept_obfs
 from psitunnel.transports.tls_tunnel import accept_tls, create_server_ssl_context
 from psitunnel.transports.ws_tunnel import accept_ws
+
+_dns_cache: Dict[str, Tuple[List[str], float]] = {}
+_dns_cache_lock = asyncio.Lock()
+DNS_CACHE_TTL = 300.0  # 5 minutes in-memory DNS caching
+
+
+async def resolve_host_cached(host: str) -> List[str]:
+    """Resolves hostname with in-memory caching and transient error retries."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+
+    now = time.monotonic()
+    async with _dns_cache_lock:
+        cached = _dns_cache.get(host)
+        if cached:
+            ips, exp = cached
+            if now < exp:
+                return ips
+            _dns_cache.pop(host, None)
+
+    loop = asyncio.get_running_loop()
+    last_exc = None
+    for attempt in range(3):
+        try:
+            addr_info = await loop.getaddrinfo(host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+            ips = list(dict.fromkeys(ai[4][0] for ai in addr_info if ai[4]))
+            if ips:
+                async with _dns_cache_lock:
+                    _dns_cache[host] = (ips, now + DNS_CACHE_TTL)
+                return ips
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(0.1 * (attempt + 1))
+
+    if last_exc:
+        raise last_exc
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
 
 
 class Channel:
@@ -36,11 +80,13 @@ class RelaySession:
     Manages a single client connection over an established transport.
     """
 
-    def __init__(self, transport: BaseTransportConnection, psk: str, logger: logging.Logger, max_channels=128, bandwidth=0):
+    def __init__(self, transport: BaseTransportConnection, psk: str, logger: logging.Logger,
+                 max_channels=128, bandwidth=0, exit_proxy: Optional[str] = None):
         self.transport = transport
         self.max_channels, self.bandwidth = max_channels, bandwidth
         self.psk = psk
         self.logger = logger
+        self.exit_proxy = exit_proxy  # Optional egress proxy URL (e.g. socks5://host:port)
         self.channels: Dict[int, Channel] = {}
         self._pending_connects: Dict[int, asyncio.Task] = {}
         self._running = True
@@ -89,15 +135,37 @@ class RelaySession:
             host, port = decode_connect_payload(payload)
             self.logger.info(f"[Conn #{conn_id}] Connecting to target {host}:{port}")
 
+            reader = None
+            writer = None
             try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port),
-                    timeout=15.0,
-                )
-                from psitunnel.common.socket_utils import tune_socket
-                tune_socket(writer)
+                if self.exit_proxy:
+                    # Route outbound traffic through exit proxy (e.g. residential IP)
+                    from psitunnel.common.proxy_connect import open_connection_with_upstream_proxy
+                    reader, writer = await open_connection_with_upstream_proxy(
+                        host, port,
+                        upstream_proxy=self.exit_proxy,
+                        timeout=15.0,
+                    )
+                else:
+                    # Direct connection — try each resolved IP in order
+                    ips = await resolve_host_cached(host)
+                    last_err = None
+                    for ip in ips:
+                        try:
+                            reader, writer = await asyncio.wait_for(
+                                asyncio.open_connection(ip, port),
+                                timeout=10.0,
+                            )
+                            from psitunnel.common.socket_utils import tune_socket
+                            tune_socket(writer)
+                            break
+                        except Exception as ce:
+                            last_err = ce
+                            continue
+                    if reader is None or writer is None:
+                        raise last_err or Exception(f"Failed to connect to {host}:{port}")
             except Exception as e:
-                self.logger.warning(f"[Conn #{conn_id}] Failed connecting to {host}:{port}: {e}")
+                self.logger.debug(f"[Conn #{conn_id}] Failed connecting to {host}:{port}: {e}")
                 err_msg = TunnelMessage(
                     Command.CMD_ERROR,
                     conn_id=conn_id,
@@ -208,13 +276,15 @@ class PsiTunnelServer:
     Main relay server capable of listening concurrently on multiple transport ports.
     """
 
-    def __init__(self, psk: str, cert_path: Optional[str] = None, key_path: Optional[str] = None, max_channels=128, bandwidth=0, max_sessions=64):
+    def __init__(self, psk: str, cert_path: Optional[str] = None, key_path: Optional[str] = None,
+                 max_channels=128, bandwidth=0, max_sessions=64, exit_proxy: Optional[str] = None):
         self.psk = psk
         if max_channels < 1 or max_sessions < 1 or bandwidth < 0:
             raise ValueError("Invalid resource limits")
         self.max_channels, self.bandwidth, self.max_sessions = max_channels, bandwidth, max_sessions
         self.cert_path = cert_path
         self.key_path = key_path
+        self.exit_proxy = exit_proxy  # Optional egress/exit proxy for outbound connections
         self.logger = setup_logger("psitunnel.server")
         self.servers: List[asyncio.Server] = []
         self.active_sessions: List[RelaySession] = []
@@ -269,7 +339,8 @@ class PsiTunnelServer:
         if len(self.active_sessions) >= self.max_sessions:
             conn.writer.close()
             return
-        session = RelaySession(conn, self.psk, self.logger, self.max_channels, self.bandwidth)
+        session = RelaySession(conn, self.psk, self.logger, self.max_channels, self.bandwidth,
+                               exit_proxy=self.exit_proxy)
         self.active_sessions.append(session)
         task = asyncio.create_task(session.run())
         task.add_done_callback(

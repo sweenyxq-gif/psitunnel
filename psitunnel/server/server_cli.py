@@ -23,6 +23,16 @@ def main():
     parser.add_argument("--ws-port", type=int, default=int(os.getenv("WS_PORT", os.getenv("PORT", "9003"))), help="Port for WebSocket tunnel (default: 9003 or $PORT)")
     parser.add_argument("--cert", default=None, help="Custom TLS certificate file")
     parser.add_argument("--key", default=None, help="Custom TLS private key file")
+    parser.add_argument(
+        "--exit-proxy",
+        default=os.getenv("EXIT_PROXY", ""),
+        help=(
+            "Exit/egress proxy for all outbound connections from the relay. "
+            "Use this to route internet traffic through a residential IP instead of the datacenter IP. "
+            "Supports: socks5://host:port, http://host:port, http://user:pass@host:port "
+            "(or set EXIT_PROXY env var)"
+        ),
+    )
 
     args = parser.parse_args()
     if not args.psk or args.psk == "psitunnel-secret-key-change-me":
@@ -30,8 +40,21 @@ def main():
 
     if args.max_channels < 1 or args.max_sessions < 1 or args.bandwidth < 0:
         parser.error("Invalid resource limits")
-    server = PsiTunnelServer(psk=args.psk, cert_path=args.cert, key_path=args.key,
-                             max_channels=args.max_channels, max_sessions=args.max_sessions, bandwidth=args.bandwidth)
+
+    exit_proxy = args.exit_proxy.strip() if args.exit_proxy else None
+
+    server = PsiTunnelServer(
+        psk=args.psk,
+        cert_path=args.cert,
+        key_path=args.key,
+        max_channels=args.max_channels,
+        max_sessions=args.max_sessions,
+        bandwidth=args.bandwidth,
+        exit_proxy=exit_proxy,
+    )
+
+    if exit_proxy:
+        print(f"[INFO] Exit proxy enabled: all outbound traffic will route via {exit_proxy}")
 
     async def run():
         await server.start(
