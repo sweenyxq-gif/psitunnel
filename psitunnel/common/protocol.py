@@ -16,6 +16,7 @@ class Command(enum.IntEnum):
     CMD_PONG = 0x06       # Relay -> Client: heartbeat response
     CMD_ERROR = 0x07      # Relay -> Client: error notice
     CMD_WINDOW = 0x08     # Receiver grants consumed bytes back to sender
+    CMD_SET_EXIT_PROXY = 0x09  # Client -> Relay: set session exit proxy URL
 
 
 class AddressType(enum.IntEnum):

@@ -52,13 +52,14 @@ def load_saved_config():
     return {}
 
 
-def save_config(host: str, port: int, psk: str, upstream_proxy: str = ""):
+def save_config(host: str, port: int, psk: str, exit_proxy: str = "", upstream_proxy: str = ""):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({
                 "server": host,
                 "port": port,
                 "psk": psk,
+                "exit_proxy": exit_proxy,
                 "upstream_proxy": upstream_proxy,
             }, f, indent=2)
     except Exception:
@@ -130,10 +131,10 @@ def main():
     print("=" * 68)
 
     saved = load_saved_config()
-    default_host = saved.get("server", "psitunnel.onrender.com")
+    default_host = saved.get("server", "psitunnel-1.onrender.com")
     default_port = saved.get("port", 443)
     default_psk = saved.get("psk", "my-super-secret-key-123")
-    default_upstream = saved.get("upstream_proxy", "")
+    default_exit = saved.get("exit_proxy", saved.get("upstream_proxy", ""))
 
     # 1. Prompt for Relay Host / URL
     print(f"\nEnter the hosted relay server URL or hostname:")
@@ -159,19 +160,19 @@ def main():
     raw_psk = input(f"Secret Key [{default_psk}]: ").strip()
     psk = raw_psk if raw_psk else default_psk
 
-    # 4. Proxy Chain (upstream proxy)
-    print(f"\nProxy Chain — Route PsiTunnel through an upstream proxy?")
-    print(f"  Leave blank to connect directly.  Examples:")
-    print(f"    http://corp-proxy.company.com:8080")
-    print(f"    http://user:pass@10.0.0.1:3128")
-    print(f"    socks5://127.0.0.1:9050   (Tor)")
-    if default_upstream:
-        print(f"    (Press Enter to reuse: {default_upstream})")
-    raw_upstream = input(f"Upstream Proxy [{default_upstream or 'none'}]: ").strip()
-    if raw_upstream.lower() in ("none", "no", "off", "disable", "disabled"):
-        upstream_proxy = ""
+    # 4. Exit Proxy (Clean/Residential proxy to bypass Datacenter IP)
+    print(f"\nExit Proxy — Route internet traffic through an external proxy?")
+    print(f"  Bypasses Render's datacenter IP so websites see this proxy's clean IP.")
+    print(f"  Leave blank for direct Render IP. Examples:")
+    print(f"    socks5://pq35n69xobor:a5jicx1x9au6cdc@104.207.32.133:1081")
+    print(f"    http://user:pass@host:port")
+    if default_exit:
+        print(f"    (Press Enter to reuse saved proxy)")
+    raw_exit = input(f"Exit Proxy [{default_exit or 'none'}]: ").strip()
+    if raw_exit.lower() in ("none", "no", "off", "disable", "disabled", "direct"):
+        exit_proxy = ""
     else:
-        upstream_proxy = raw_upstream if raw_upstream else default_upstream
+        exit_proxy = raw_exit if raw_exit else default_exit
 
     # 5. Prompt for Chrome launch
     print(f"\nLaunch Google Chrome automatically with this proxy? [Y/n]:")
@@ -179,14 +180,16 @@ def main():
     auto_chrome = raw_chrome not in ("n", "no")
 
     # Save preferences for next launch
-    save_config(host, port, psk, upstream_proxy)
+    save_config(host, port, psk, exit_proxy=exit_proxy)
 
     print("\n" + "-" * 68)
-    print(f" Connecting to : {host}:{port} [WSS]")
-    if upstream_proxy:
-        print(f" Proxy Chain   : {upstream_proxy} → {host}:{port}")
-    print(f" Local SOCKS5  : socks5://127.0.0.1:1080")
-    print(f" Local HTTP    : http://127.0.0.1:8080")
+    print(f" Relay Server : {host}:{port} [WSS]")
+    if exit_proxy:
+        print(f" Exit Proxy   : {exit_proxy} (Datacenter IP Bypassed)")
+    else:
+        print(f" Exit Proxy   : Direct (Render Datacenter IP)")
+    print(f" Local SOCKS5 : socks5://127.0.0.1:1080")
+    print(f" Local HTTP   : http://127.0.0.1:8080")
     print("-" * 68)
 
     # Free local port if locked
@@ -200,7 +203,7 @@ def main():
     fallback_mgr = FallbackManager(
         psk=psk,
         candidate_endpoints=candidate_endpoints,
-        upstream_proxy=upstream_proxy if upstream_proxy else None,
+        exit_proxy=exit_proxy if exit_proxy else None,
         max_channels=1024,
         bandwidth=0,
     )
@@ -262,8 +265,10 @@ def main():
         print(" [SUCCESS] PsiTunnel is active and protecting your traffic!")
         print(" SOCKS5 Proxy : socks5://127.0.0.1:1080")
         print(" HTTP Proxy   : http://127.0.0.1:8080")
-        if upstream_proxy:
-            print(f" Chain Route  : You → {upstream_proxy} → {host}:{port} → Internet")
+        if exit_proxy:
+            print(f" Exit Route   : You → {host}:{port} → {exit_proxy} → Internet")
+        else:
+            print(f" Route        : You → {host}:{port} → Internet")
         print("=" * 60 + "\n")
 
         if auto_chrome:

@@ -58,7 +58,8 @@ class FallbackManager:
     Multiplexes local client connections over the active transport tunnel.
     """
 
-    def __init__(self, psk: str, candidate_endpoints: List[Dict[str, Any]], upstream_proxy: Optional[str] = None, max_channels=1024, bandwidth=0):
+    def __init__(self, psk: str, candidate_endpoints: List[Dict[str, Any]], upstream_proxy: Optional[str] = None,
+                 exit_proxy: Optional[str] = None, max_channels=1024, bandwidth=0):
         """
         candidate_endpoints: list of dicts:
           [
@@ -67,6 +68,7 @@ class FallbackManager:
             {"transport": "obfs", "host": "127.0.0.1", "port": 9001},
           ]
         upstream_proxy: optional URL to corporate forward proxy (e.g. "http://corp-proxy:8080")
+        exit_proxy: optional URL to egress/residential proxy used by relay server (e.g. "socks5://user:pass@host:port")
         """
         self.psk = psk
         if max_channels < 1 or bandwidth < 0:
@@ -74,6 +76,7 @@ class FallbackManager:
         self.max_channels, self.bandwidth = max_channels, bandwidth
         self.candidates = candidate_endpoints
         self.upstream_proxy = upstream_proxy
+        self.exit_proxy = exit_proxy
         self.logger = setup_logger("psitunnel.client")
         self.active_transport: Optional[BaseTransportConnection] = None
         self.active_candidate: Optional[Dict[str, Any]] = None
@@ -138,6 +141,20 @@ class FallbackManager:
                         self.active_transport = conn
                         self.active_candidate = cand
                         self.logger.info(f"Successfully established tunnel via [{t_type.upper()}] to {host}:{port}!")
+
+                        # If user configured an exit proxy, send it to the relay server
+                        if self.exit_proxy:
+                            try:
+                                await conn.send_message(
+                                    TunnelMessage(
+                                        Command.CMD_SET_EXIT_PROXY,
+                                        conn_id=0,
+                                        payload=self.exit_proxy.encode("utf-8"),
+                                    )
+                                )
+                                self.logger.info(f"Configured relay exit proxy: {self.exit_proxy}")
+                            except Exception as pe:
+                                self.logger.warning(f"Failed to set exit proxy on relay: {pe}")
 
                         # Start background reader and ping loop
                         self._pong_events[conn] = asyncio.Event()

@@ -125,6 +125,13 @@ class RelaySession:
                 elif msg.cmd == Command.CMD_PING:
                     pong = TunnelMessage(Command.CMD_PONG, conn_id=0, payload=msg.payload)
                     await self.transport.send_message(pong, inject_padding=False)
+                elif msg.cmd == Command.CMD_SET_EXIT_PROXY:
+                    proxy_str = msg.payload.decode("utf-8", errors="ignore").strip()
+                    self.exit_proxy = proxy_str if proxy_str else None
+                    if self.exit_proxy:
+                        self.logger.info(f"Client configured exit proxy: {self.exit_proxy}")
+                    else:
+                        self.logger.info("Client cleared exit proxy (direct egress)")
         except Exception as e:
             self.logger.debug(f"Relay session loop error: {e}")
         finally:
